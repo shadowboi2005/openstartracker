@@ -9,7 +9,15 @@ from io	import StringIO,BytesIO
 import fcntl
 import beast
 from systemd import daemon
+from contextlib import redirect_stdout
+import timeit
+import serial
+tstart = time()
 
+
+out_val='not solved'
+prt = '/dev/USB'
+data_out = ""
 P_MATCH_THRESH=0.99
 SIMULATE=0
 if 'WATCHDOG_USEC' not in os.environ:
@@ -23,18 +31,6 @@ def trace(frame, event, arg):
 
 CONFIGFILE=sys.argv[1]
 YEAR=float(sys.argv[2])
-
-#set up server before we do anything else
-server=socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-try: 
-	server.bind(('127.0.0.1', 8010))
-except:
-	print("server socket already open: try terminal command: sudo kill $(sudo lsof -t -i:8010)")
-	exit()
-
-server.listen(5)
-server.setblocking(0)
 
 print ("Loading config" )
 print (CONFIGFILE)
@@ -123,18 +119,23 @@ def print_ori(body2ECI):
 	#RA=np.degrees(np.arctan2(body2ECI[1,0],body2ECI[0,0]))
 	##rotation about the camera axis (-180 to +180)
 	#ORIENTATION=np.degrees(-np.arctan2(body2ECI[1,2],body2ECI[2,2]))
+	global out_val
 	DEC=np.degrees(np.arcsin(body2ECI[0,2]))
 	RA=np.degrees(np.arctan2(body2ECI[0,1],body2ECI[0,0]))
 	ORIENTATION=np.degrees(-np.arctan2(body2ECI[1,2],body2ECI[2,2]))
 	if ORIENTATION>180:
 		ORIENTATION=ORIENTATION-360
+		#rotation about the y axis (-90 to +90)
+		#print(time() - tstart,":")
+		#print ("DEC="+str(DEC))
+		#rotation about the z axis (-180 to +180)
+		#print ("RA="+str(RA))
+		#rotation about the camera axis (-180 to +180)
+		#print ("ORIENTATION="+str(ORIENTATION))
+		#print()
+	#print(RA ,",",DEC,",",ORIENTATION)
+	out_val =str(RA) +","+str(DEC)+","+str(ORIENTATION)
 
-	#rotation about the y axis (-90 to +90)
-	print ("DEC="+str(DEC), file=sys.stderr)
-	#rotation about the z axis (-180 to +180)
-	print ("RA="+str(RA), file=sys.stderr)
-	#rotation about the camera axis (-180 to +180)
-	print ("ORIENTATION="+str(ORIENTATION), file=sys.stderr)
 
 class star_image:
 	def __init__(self, imagefile,median_image):
@@ -239,13 +240,16 @@ class star_image:
 		if bodyCorrection is None:
 			bodyCorrection=np.eye(3)
 		if self.match is not None:
-			self.match.winner.print_ori()
+			global data_out
+			data_out = winner_attitude(self.match.winner)
+			print_ori(data_out)
+			#self.match.winner.print_ori() //printing statement stopped for now
 		db=self.db_stars
 		im=self.img_stars
 		if db is None:
 			if self.db_stars_from_lm is None:
 				#neither relative nor absolute matching could be used
-				print("")
+				#print("Couldnt match \n")
 				return
 			else:
 				db=self.db_stars_from_lm
@@ -258,15 +262,15 @@ class star_image:
 				weight=1.0/(s_db.sigma_sq+s_im.sigma_sq)
 				temp=np.dot(bodyCorrection, np.array([[s_im.x],[s_im.y],[s_im.z]]))
 				star_out.append(str(temp[0,0])+','+str(temp[1,0])+','+str(temp[2,0])+','+str(s_db.x)+','+str(s_db.y)+','+str(s_db.z)+','+str(weight))
-		print ("stars",len(star_out), file=sys.stderr)
-		print ("ang_rate: "+angrate_string, file=sys.stderr)
-		print (" ".join(star_out)+" "+angrate_string)
+		print()
+		#print ("stars",len(star_out), file=sys.stderr)
 
 NONSTARS={}
 NONSTAR_NEXT_ID=0
 NONSTAR_DATAFILENAME="/dev/null"
 #NONSTAR_DATAFILENAME="data"+str(time())+".txt"
 NONSTAR_DATAFILE=open(NONSTAR_DATAFILENAME,"w")
+
 class nonstar:
 	def __init__(self,current_image,i,source):
 		global NONSTARS,NONSTAR_NEXT_ID,NONSTAR_DATAFILENAME,NONSTAR_DATAFILE
@@ -377,12 +381,12 @@ class star_camera:
 			s.connect(("jeb",7011))
 			data = s.recv(2048)
 			s.close()
-		print("Time1: "+str(time() - starttime), file=sys.stderr)
+		#print("Time1: "+str(time() - starttime), file=sys.stderr)
 		self.current_image=star_image(imagefile,self.median_image)
-		print("Time2: "+str(time() - starttime), file=sys.stderr)
+		#print("Time2: "+str(time() - starttime), file=sys.stderr)
 		if (lis==1):
 			self.current_image.match_lis()
-		print("Time3: "+str(time() - starttime), file=sys.stderr)
+		#print("Time3: "+str(time() - starttime), file=sys.stderr)
 		if self.last_match is not None:
 			self.current_image.match_rel(self.last_match)
 		if (quiet==0):
@@ -390,170 +394,17 @@ class star_camera:
 				print (data.rstrip("\n").rstrip("\r"))
 			else:
 				self.current_image.print_match()
-			print("Time4: "+str(time() - starttime), file=sys.stderr)
-			
-		update_nonstars(self.current_image,self.source)
-		print("Time5: "+str(time() - starttime), file=sys.stderr)
-		if self.current_image.match is not None:
-			self.last_match=self.current_image
-		else:
-			self.last_match=None
-		print("Time6: "+str(time() - starttime), file=sys.stderr)
-		
-	def extrapolate_image(self,imagefile1,imagefile2,time1,time2):
-		#self.solve_image(imagefile2,lis=1,quiet=0)
-		self.solve_image(imagefile1,lis=1,quiet=1)
-		print(1, file=sys.stderr)
-		if (self.last_match is None):
-			print(2, file=sys.stderr)
-			print ("")
-			return
-		a1=winner_attitude(self.last_match.match.winner)
-		self.solve_image(imagefile2,lis=1,quiet=1)
-		print(3, file=sys.stderr)
-		if (self.last_match is None):
-			print(4, file=sys.stderr)
-			print ("")
-			return
-		a2=winner_attitude(self.last_match.match.winner)
-		print(a1,a2,LA.svd(a1)[1],LA.svd(a1)[1], file=sys.stderr)
-		a,angrate=extrapolate_matrix(a1,a2,time1,time2,time()*1e6)
-		print(a,LA.svd(a)[1], file=sys.stderr)
-		
-		self.last_match.print_match(a,",".join([str(i) for i in angrate.tolist()]))
-		
-#dummy for now
-#TODO: add science data from IR cam
-class science_camera:
-	def __init__(self, median_file,source="IR"):
-		self.source=source
-		self.current_image=None
-		self.last_match=None
-		self.median_image=cv2.imread(median_file)
-	def solve_image(self,imagefile):
-		if sys.version_info[0]>2:
-			os.write(1,bytes(os.path.abspath(NONSTAR_DATAFILENAME),encoding='UTF-8'))
-		else:
-			os.write(1,os.path.abspath(NONSTAR_DATAFILENAME))
 
 rgb=star_camera(sys.argv[3])
-ir=science_camera(sys.argv[3])
 
-CONNECTIONS = {}
-class connection:
-	"""Tracks activity on a file descriptor and allows TCP read/writes"""
-	def __init__(self, conn, epoll):
-		"""
-		Create connection to track file descriptor activity
-		@note: Adds C{fd . self} to C{CONNECTIONS}
-		@param conn: Any file object with the fileno() method
-		@param epoll: File descriptor edge polling object
-		"""
-		self.conn=conn
-		self.fd = self.conn.fileno()
-		epoll.register(self.fd, select.EPOLLIN)
-		self.epoll = epoll
-		CONNECTIONS[self.fd] = self
+path_to_img = "/home/imnothackr/SSP/sprint1/openstartracker/img_rpi/samples/image"
 
-	def read(self):
-		"""
-		Complete non-blocking read on file descriptor
-		of an arbitrary amount of data
-		@return: Entire read string
-		@rtype: C{string}
-		"""
-		# need nonblocking for read
-		fl = fcntl.fcntl(self.fd, fcntl.F_GETFL)
-		fcntl.fcntl(self.fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
-		data = b''
-		try:
-			while True:
-				lastlen=len(data)
-				data += os.read(self.fd, 1024)
-				if len(data)==lastlen:
-					break
-		except OSError as e:
-			# error 11 means we have no more data to read
-			if e.errno == 11:
-				pass
-			elif e.errno == 104:
-				print("WARNING: ABNORMAL DISCONNECT", file=sys.stderr)
-			else:
-				raise
-		return data
+listofnum = ['12','19','21','41','43']
 
-	def write(self, data):
-		"""
-		Blocking read on file descriptor
-		@param data: ASCII data to write
-		@type data: C{string}
-		"""
-		if len(data) == 0: return
-		if self.fd==0: #stdin
-			if sys.version_info[0]>2:
-				os.write(1, bytes(data,encoding='UTF-8'))
-			else:
-				os.write(1, data)
-			return
-		# need blocking IO for writing
-		fl = fcntl.fcntl(self.fd, fcntl.F_GETFL)
-		fcntl.fcntl(self.fd, fcntl.F_SETFL, fl & ~os.O_NONBLOCK)
-		if sys.version_info[0]>2:
-			os.write(self.fd, bytes(data,encoding='UTF-8'))
-		else:
-			os.write(self.fd, data)
-
-	def close(self):
-		"""Close connection with file descriptor"""
-		self.epoll.unregister(self.fd)
-		self.conn.close()
-		if CONNECTIONS[self.fd]:
-			del CONNECTIONS[self.fd]
-
-epoll = select.epoll()
-epoll.register(server.fileno(), select.EPOLLIN)
-
-try:
-	connection(sys.stdin,epoll)
-except IOError:
-	pass
-
-daemon.notify("WATCHDOG=1")
-lastPing = time()
-while True:
-	#systemd watchdog
-	events = epoll.poll(float(os.environ['WATCHDOG_USEC'])/2.0e6 - (time() - lastPing))
-	if len(events) == 0 or time() >= (lastPing + float(os.environ['WATCHDOG_USEC'])/2.0e6):
-		daemon.notify("WATCHDOG=1")
-		lastPing = time()
-	#events = epoll.poll()
-	for fd, event_type in events:
-		# Activity on the master socket means a new connection.
-		if fd == server.fileno():
-			conn, addr = server.accept()
-			connection(conn, epoll)
-		elif fd in CONNECTIONS:
-			w = CONNECTIONS[fd]
-			data = w.read()
-			print(data.decode(encoding='UTF-8'), file=sys.stderr)
-			if len(data) > 0:
-				if sys.version_info[0]>2:
-					stdout_redir = StringIO()
-				else:
-					stdout_redir = BytesIO()
-				stdout_old = sys.stdout
-				sys.stdout = stdout_redir
-				try:
-					exec(data)
-				except SystemExit:
-					w.close()
-					raise
-				except:
-					traceback.print_exc(file=sys.stdout)
-				sys.stdout = stdout_old
-				data_out = stdout_redir.getvalue()
-				print(data_out, file=sys.stderr)
-				w.write(data_out)
-			else:
-				w.close()
-
+for num in listofnum:
+	path_to_img_l = path_to_img + num + '.jpg'
+	rgb.solve_image(path_to_img_l)
+	#ser = serial.Serial(port=prt)
+	print(out_val)
+	#ser.write(out_val)
+	out_val = 'not solved'
